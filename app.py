@@ -17,9 +17,17 @@ if not csv_files:
     st.error("Kansiosta ei löytynyt yhtään CSV-tiedostoa.")
     st.stop()
 
-selected_csv = st.selectbox("Valitse sanalista", csv_files, index=0)
+# Muista aiempi valinta sessionissa (helpottaa käyttöä)
+prev_sel = st.session_state.get("selected_csv")
+default_index = csv_files.index(prev_sel) if prev_sel in csv_files else 0
+selected_csv = st.selectbox("Valitse sanalista", csv_files, index=default_index, key="selected_csv")
 
-# päivitä utilsin tiedostopolut valinnan mukaan
+# Nollaa käynnissä oleva visa, jos lista vaihtui
+if st.session_state.get("selected_csv_prev") != selected_csv:
+    st.session_state.quiz_state = None
+    st.session_state.selected_csv_prev = selected_csv
+
+# Päivitä utilsin polut valinnan mukaan
 utils.CSV_FILE = selected_csv
 base = os.path.splitext(selected_csv)[0]
 utils.PACKAGES_FILE = f"{base}_packages.json"
@@ -31,7 +39,7 @@ st.write(f"📂 Käytössä lista: **{selected_csv}**")
 # Ladataan sanat ja paketit
 # --------------------
 try:
-    words = utils.load_words()
+    words = utils.load_words()  # utils.load_words käyttää nyt utils.CSV_FILE:tä
 except Exception as e:
     st.error(f"Virhe sanalistan latauksessa: {e}")
     st.stop()
@@ -50,7 +58,6 @@ else:
 # --------------------
 # Välilehdet ja tila
 # --------------------
-scores = utils.load_highscores()
 TAB_LABELS = ["📂 Pakettilista", "🎮 Visa", "📊 Tulos", "🏆 Ennätykset"]
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = None
@@ -73,7 +80,6 @@ with tab1:
         total_words = len(words)
         num_packages = len(packages)
         st.caption(f"📦 {total_words} sanaa, {num_packages} pakettia (paketin koko {utils.PACKAGE_SIZE})")
-
         for p_id, idxs in packages.items():
             st.subheader(f"{p_id} — {len(idxs)} sanaa")
             st.table(words.iloc[idxs][["suomi", "italia", "epäsäännöllinen"]])
@@ -160,7 +166,7 @@ with tab2:
 
                 st.subheader(f"Sana: **{question}**")
 
-                # ------------- Palautenäkymä: Enter = Seuraava -------------
+                # --- Palautenäkymä: Enter = Seuraava ---
                 if state.get("await_next"):
                     fb = state.get("last_feedback", {})
                     if fb.get("is_correct"):
@@ -168,7 +174,6 @@ with tab2:
                     else:
                         st.error(f"✗ Väärin. Oikea vastaus: {fb.get('answer')}")
 
-                    # LOMAKE: Enter lähettää -> sama kuin "Seuraava"
                     next_form_key = f"nextform_{state['qkey']}"
                     next_input_key = f"continue_{state['qkey']}"
 
@@ -181,7 +186,7 @@ with tab2:
                         )
                         go_next = st.form_submit_button("Seuraava")
 
-                    # Autofocus jatkokenttään, jotta Enter toimii suoraan
+                    # Autofocus jatkokenttään
                     components.html(
                         """
                         <script>
@@ -198,14 +203,11 @@ with tab2:
                     )
 
                     if go_next:
-                        # Eka kierros -laskuri päivittyy vasta tässä
                         if fb.get("is_correct") and state["ptr"] < state["first_total"]:
                             state["first_correct"] += 1
-                        # väärä -> jonon perälle, jos asetuksissa näin
                         if (not fb.get("is_correct")) and state["mode"] == "Kunnes kaikki oikein":
                             state["indices"].append(fb.get("current_index"))
 
-                        # siirry seuraavaan kysymykseen
                         state["ptr"] += 1
                         state["qkey"] += 1
                         state["await_next"] = False
@@ -214,20 +216,19 @@ with tab2:
                             state["done"] = True
                         st.rerun()
 
-                # ------------- Vastauslomake (autofocus vastauskenttään) -------------
+                # --- Vastauslomake (autofocus vastauskenttään) ---
                 else:
                     with st.form(key=f"form_{state['qkey']}"):
                         user_answer = st.text_input("Vastauksesi:")
                         submitted = st.form_submit_button("Tarkista")
 
-                    # Autofocus vastauskenttään, jotta voi kirjoittaa heti ilman hiirtä
                     components.html(
                         """
                         <script>
                         const t = setInterval(() => {
                           const inputs = window.parent.document.querySelectorAll('input[type="text"]');
                           if (inputs.length) {
-                            inputs[inputs.length - 1].focus();  // uusin kenttä = vastauskenttä
+                            inputs[inputs.length - 1].focus();
                             clearInterval(t);
                           }
                         }, 50);
@@ -240,7 +241,6 @@ with tab2:
                         correct_set = [a.strip().lower() for a in str(answer).split(";")]
                         is_correct = user_answer.strip().lower() in correct_set
 
-                        # Tallenna palaute tilaan ja odota Enter/Seuraava
                         state["last_feedback"] = {
                             "is_correct": is_correct,
                             "answer": answer,
@@ -305,16 +305,35 @@ with tab3:
         st.info("Pelaa visa ja palaa tähän nähdäksesi tuloksen.")
 
 # --------------------
-# TAB 4: Ennätykset
+# TAB 4: Ennätykset (korjattu nollaus + suodatus)
 # --------------------
 with tab4:
     st.header("Ennätykset")
+    st.caption(f"📄 Tämä näkymä käyttää tiedostoa: **{utils.HIGHSCORES_FILE}** (lista: **{selected_csv}**)")
+
     scores = utils.load_highscores()
-    if not scores:
-        st.info("Ei ennätyksiä vielä.")
+
+    # Näytä vain nykyisen CSV:n paketteihin kuuluvat rivit
+    valid_keys = set()
+    if packages:
+        valid_pkg_names = set(packages.keys())  # esim. {"paketti_1", ...}
+        for k in scores.keys():
+            try:
+                _, pkg_name, _ = [s.strip() for s in k.split("|", maxsplit=2)]
+            except Exception:
+                pkg_name = None
+            if pkg_name in valid_pkg_names:
+                valid_keys.add(k)
+    else:
+        valid_keys = set(scores.keys())
+
+    filtered_scores = {k: v for k, v in scores.items() if k in valid_keys}
+
+    if not filtered_scores:
+        st.info("Ei ennätyksiä tälle sanalistalle vielä.")
     else:
         rows = []
-        for k, v in sorted(scores.items(), key=lambda x: x[0]):
+        for k, v in sorted(filtered_scores.items(), key=lambda x: x[0]):
             rows.append({
                 "Avain": k,
                 "Oikein": v.get("oikein"),
@@ -325,19 +344,33 @@ with tab4:
             })
         st.dataframe(rows, use_container_width=True)
 
-        col1, col2 = st.columns([2,1])
+        st.divider()
+        col1, col2, col3 = st.columns([2, 1, 1])
+
         with col1:
             reset_target = st.selectbox(
                 "Valitse nollattava avain (tai Tyhjennä kaikki)",
-                ["—"] + list(scores.keys()) + ["Tyhjennä kaikki"],
+                ["—"] + sorted(filtered_scores.keys()) + ["Tyhjennä kaikki"],
             )
+
         with col2:
             if st.button("Nollaa"):
-                if reset_target == "Tyhjennä kaikki":
-                    utils.reset_highscore()
-                    st.success("Kaikki ennätykset nollattu.")
+                # Jos valinnassa on mikä tahansa "Tyhjennä kaikki" -muoto → tyhjennä koko tiedosto
+                if isinstance(reset_target, str) and "Tyhjennä kaikki" in reset_target:
+                    utils.reset_highscore()  # None -> tyhjennä kaikki
+                    st.success("Kaikki ennätykset tälle sanalistalle nollattu.")
                     st.rerun()
                 elif reset_target != "—":
                     utils.reset_highscore(reset_target)
                     st.success("Valittu ennätys nollattu.")
                     st.rerun()
+
+        with col3:
+            # Kovin reset: poista koko highscores-tiedosto tältä listalta
+            if st.button("Poista highscores-tiedosto"):
+                try:
+                    os.remove(utils.HIGHSCORES_FILE)
+                    st.success(f"Poistettu: {utils.HIGHSCORES_FILE}")
+                except FileNotFoundError:
+                    st.info("Tiedostoa ei ollut valmiiksi.")
+                st.rerun()
