@@ -17,7 +17,7 @@ if not csv_files:
     st.error("Kansiosta ei löytynyt yhtään CSV-tiedostoa.")
     st.stop()
 
-# Muista aiempi valinta sessionissa (helpottaa käyttöä)
+# Muista aiempi valinta sessionissa
 prev_sel = st.session_state.get("selected_csv")
 default_index = csv_files.index(prev_sel) if prev_sel in csv_files else 0
 selected_csv = st.selectbox("Valitse sanalista", csv_files, index=default_index, key="selected_csv")
@@ -87,7 +87,7 @@ with tab1:
         st.info("Paina \"Jaa paketit uudelleen\" luodaksesi paketit.")
 
 # --------------------
-# TAB 2: Visa (palaute jää näkyviin; Enter = Seuraava; autofocus vastauskenttään)
+# TAB 2: Visa (palaute näkyy; Enter = Seuraava; autofocus)
 # --------------------
 with tab2:
     st.header("Visa")
@@ -96,8 +96,7 @@ with tab2:
     - Valitse suunta (it→fi tai fi→it), sanajoukko ja tila.
     - Valitse haluamasi paketti tai kaikki paketit.
     - Paina **Aloita visa** aloittaaksesi.
-    - Vastaa kirjoittamalla käännös ja paina Enter / Tarkista.
-    - Tilassa *Kunnes kaikki oikein* väärin menneet sanat palaavat jonoon.
+    - Enter tarkistaa vastauksen. Palautteen aikana Enter = Seuraava.
     """)
     if not packages:
         st.info("Luo paketit ensin.")
@@ -143,6 +142,7 @@ with tab2:
                 # palaute-virta:
                 "await_next": False,    # odotetaanko Enter/Seuraava
                 "last_feedback": None,  # {"is_correct": bool, "answer": str, "user": str, "current_index": int}
+                "saved": False,         # tallennettiinko tulos jo (ennätykset)
             }
 
         state = st.session_state.quiz_state
@@ -251,7 +251,7 @@ with tab2:
                         st.rerun()
 
 # --------------------
-# TAB 3: Tulos
+# TAB 3: Tulos (ennätys tallennetaan vain kerran)
 # --------------------
 with tab3:
     st.header("Tulokset")
@@ -285,27 +285,32 @@ with tab3:
                 f"Eka kierros oikein: **{first_correct}/{first_total} ({pct}%)**"
                 + (f" — aika {duration} s, keskimäärin {avg_time} s/sana" if duration else "")
             )
-            key = f"{state['direction']} | {state['package']} | {state['wordset']}"
-            scores = utils.load_highscores()
-            prev = scores.get(key)
-            now = {
-                "oikein": first_correct,
-                "yhteensä": first_total,
-                "prosentti": pct,
-                "aikaleima": datetime.now().isoformat(timespec="seconds"),
-                "kesto_s": duration if duration else None,
-            }
-            if (not prev) or (first_correct > prev.get("oikein", -1)):
-                scores[key] = now
-                utils.save_highscores(scores)
-                st.write("Ennätys tallennettu.")
-            else:
-                st.caption("Ei ylittänyt aiempaa ennätystä → ei tallennettu.")
+
+            # --- TALLENNA VAIN KERRAN ---
+            if not state.get("saved", False):
+                key = f"{state['direction']} | {state['package']} | {state['wordset']}"
+                scores = utils.load_highscores()
+                prev = scores.get(key)
+                now = {
+                    "oikein": first_correct,
+                    "yhteensä": first_total,
+                    "prosentti": pct,
+                    "aikaleima": datetime.now().isoformat(timespec="seconds"),
+                    "kesto_s": duration if duration else None,
+                }
+                if (not prev) or (first_correct > prev.get("oikein", -1)):
+                    scores[key] = now
+                    utils.save_highscores(scores)
+                    st.write("Ennätys tallennettu.")
+                else:
+                    st.caption("Ei ylittänyt aiempaa ennätystä → ei tallennettu.")
+                # Merkitse käsitellyksi, ettei seuraavat rerunit kirjoita uudelleen
+                state["saved"] = True
     else:
         st.info("Pelaa visa ja palaa tähän nähdäksesi tuloksen.")
 
 # --------------------
-# TAB 4: Ennätykset (korjattu nollaus + suodatus)
+# TAB 4: Ennätykset (suodatus + varmat nollaukset)
 # --------------------
 with tab4:
     st.header("Ennätykset")
@@ -316,7 +321,7 @@ with tab4:
     # Näytä vain nykyisen CSV:n paketteihin kuuluvat rivit
     valid_keys = set()
     if packages:
-        valid_pkg_names = set(packages.keys())  # esim. {"paketti_1", ...}
+        valid_pkg_names = set(packages.keys())
         for k in scores.keys():
             try:
                 _, pkg_name, _ = [s.strip() for s in k.split("|", maxsplit=2)]
@@ -355,14 +360,15 @@ with tab4:
 
         with col2:
             if st.button("Nollaa"):
-                # Jos valinnassa on mikä tahansa "Tyhjennä kaikki" -muoto → tyhjennä koko tiedosto
                 if isinstance(reset_target, str) and "Tyhjennä kaikki" in reset_target:
-                    utils.reset_highscore()  # None -> tyhjennä kaikki
+                    utils.reset_highscore()          # tyhjennä kaikki tälle listalle
                     st.success("Kaikki ennätykset tälle sanalistalle nollattu.")
+                    st.session_state.quiz_state = None   # estä Tulos-tabin uudelleenkirjoitus
                     st.rerun()
                 elif reset_target != "—":
                     utils.reset_highscore(reset_target)
                     st.success("Valittu ennätys nollattu.")
+                    st.session_state.quiz_state = None   # estä Tulos-tabin uudelleenkirjoitus
                     st.rerun()
 
         with col3:
@@ -373,4 +379,5 @@ with tab4:
                     st.success(f"Poistettu: {utils.HIGHSCORES_FILE}")
                 except FileNotFoundError:
                     st.info("Tiedostoa ei ollut valmiiksi.")
+                st.session_state.quiz_state = None
                 st.rerun()
