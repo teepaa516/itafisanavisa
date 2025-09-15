@@ -13,8 +13,13 @@ PACKAGE_SIZE = 20
 # --------------------
 # Sanat
 # --------------------
-def load_words(csv_file: str = CSV_FILE) -> pd.DataFrame:
-    """Lataa sanat CSV:stä ja varmistaa sarakkeet"""
+def load_words(csv_file: str | None = None) -> pd.DataFrame:
+    """Lataa sanat CSV:stä ja varmistaa sarakkeet.
+    Jos csv_file on None, käytetään utils.CSV_FILE -globaalimuuttujaa.
+    """
+    if csv_file is None:
+        csv_file = CSV_FILE
+
     df = pd.read_csv(csv_file)
     expected = {"suomi", "italia", "epäsäännöllinen"}
     missing = expected - set(df.columns)
@@ -23,6 +28,7 @@ def load_words(csv_file: str = CSV_FILE) -> pd.DataFrame:
     for col in ["suomi", "italia", "epäsäännöllinen"]:
         df[col] = df[col].astype(str).fillna("").str.strip()
     return df
+
 
 # --------------------
 # Paketinhallinta
